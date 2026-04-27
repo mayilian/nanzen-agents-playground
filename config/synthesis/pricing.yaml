@@ -1,0 +1,20 @@
+# Per-1M-token pricing for cost estimation in BENCHMARK.md.
+#
+# These figures are approximate and drift over time. Update when
+# Anthropic publishes new prices. The pipeline tolerates missing entries
+# by falling back to `default`.
+
+models:
+  claude-haiku-4-5-20251001:
+    input_per_m_usd: 1.0
+    output_per_m_usd: 5.0
+  claude-sonnet-4-6:
+    input_per_m_usd: 3.0
+    output_per_m_usd: 15.0
+  claude-opus-4-7:
+    input_per_m_usd: 15.0
+    output_per_m_usd: 75.0
+
+default:
+  input_per_m_usd: 3.0
+  output_per_m_usd: 15.0

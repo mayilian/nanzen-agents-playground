@@ -1,0 +1,42 @@
+# Customer-specific configuration for Meridian Health (MERID-001).
+#
+# Overrides values from _defaults.yaml. Anything omitted here falls
+# back to the default.
+
+account_id: MERID-001
+canonical_name: "Meridian Health"
+
+# All textual variants of the customer name found in the data.
+# Used by joins.text_mention as the substring needle.
+aliases:
+  - "Meridian Health"
+  - "Meridian Health BV"
+  - "MERIDIAN HEALTH"
+  - "MERIDIAN HEALTH BV"
+  - "Meridian"
+  - "MERIDIAN"
+
+# Email domains belonging to this customer. Used by per-source resolvers
+# for ``emails`` and ``crm_interactions`` when those CSVs lack an
+# account_id column.
+email_domains:
+  - "meridianhealth.com"
+
+# Customer departments — used by the support_tickets resolver, which
+# joins on ``customer_department`` when no account_id is present.
+# Plus 'All' which the support data uses for cross-cutting tickets.
+departments:
+  - Engineering
+  - Marketing
+  - Procurement
+  - All
+
+# This customer's invoice prefix is derivable from contract IDs
+# (CTR-2023-MH-001 → "MH"); listed explicitly here as a safety net for
+# joins.derive_invoice_prefix.
+invoice_prefix: MH
+
+# Override default to ``include_with_warning`` because the fixture data
+# is genuinely Meridian-only — switching to skip mode would zero out
+# the support / CRM / emails sources.
+unresolvable_row_policy: include_with_warning

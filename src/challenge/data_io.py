@@ -22,7 +22,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from challenge.canonical import NORMALISATIONS
+from challenge.canonical import CanonicalisationLog, normalise_column
+from challenge.config import config_dir
 from challenge.models import LoadReport, LoadResult
 
 logger = logging.getLogger(__name__)
@@ -100,40 +101,69 @@ def _read_csv(
     return df
 
 
-def _apply_normalisations(
+def _apply_canonicalisations(
     df: pd.DataFrame,
     source: str,
-    normalisations_log: list[tuple[str, str, str]],
+    log: CanonicalisationLog,
 ) -> pd.DataFrame:
-    """Apply F6-style canonicalisation; record every replacement made."""
-    for (src, column), table in NORMALISATIONS.items():
-        if src != source or column not in df.columns:
-            continue
-        for wrong, right in table.items():
-            count = int((df[column] == wrong).sum())
-            if count > 0:
-                normalisations_log.append((source, wrong, right))
-                df = df.copy()
-                df[column] = df[column].replace({wrong: right})
+    """Apply tiered canonicalisation to every column with a config rule.
+
+    Iterates over each column in the DataFrame and asks ``canonical``
+    whether a YAML rule exists for ``(source, column)``. If yes, the
+    rule is applied (alias / fuzzy / unknown surfacing). Otherwise the
+    column passes through unchanged.
+
+    Mutates ``log`` with every applied/surfaced action.
+    """
+    for column in df.columns:
+        df = normalise_column(df, source, column, log)
     return df
 
 
 def load_all(data_dir: Path | None = None) -> LoadResult:
-    """Load all eight CSVs into a typed bundle with audit trail.
+    """Load all eight CSVs into a typed bundle with full audit trail.
 
-    This is the single entry point for raw data; nothing else in the
-    pipeline reads CSVs directly.
+    The single entry point for raw data; nothing else in the pipeline
+    reads CSVs directly.
+
+    Args:
+      data_dir: optional override for the data directory. Defaults to
+        the project's ``data/`` folder.
+
+    Returns:
+      ``LoadResult`` whose ``report`` field carries everything the
+      renderer should know about data quality (parse warnings, dropped
+      rows, normalisation actions, surfaced unknown values).
+
+    Raises:
+      FileNotFoundError: if a required CSV is missing.
+      ValueError: if a CSV is missing required columns (schema drift).
     """
     data_dir = data_dir or DATA_DIR_DEFAULT
     parse_warnings: list[str] = []
     rows_dropped: dict[str, int] = {}
-    normalisations_log: list[tuple[str, str, str]] = []
+    canon_log = CanonicalisationLog()
+
+    # Aggregate (source, column, …) tuples for the LoadReport.
+    aliases_with_source: list[tuple[str, str, str]] = []
+    fuzzy_with_source: list[tuple[str, str, str, float]] = []
+    unknown_with_source: list[tuple[str, str]] = []
 
     sources: dict[str, pd.DataFrame] = {}
     for source in REQUIRED_COLUMNS:
+        per_source_log = CanonicalisationLog()
         df = _read_csv(data_dir / f"{source}.csv", source, parse_warnings, rows_dropped)
-        df = _apply_normalisations(df, source, normalisations_log)
+        df = _apply_canonicalisations(df, source, per_source_log)
         sources[source] = df
+
+        # Annotate each entry with its source so the LoadReport carries
+        # source-attributed tuples.
+        for col, frm, to in per_source_log.aliases_applied:
+            aliases_with_source.append((source, frm, to))
+        for col, frm, to, score in per_source_log.fuzzy_applied:
+            fuzzy_with_source.append((source, frm, to, score))
+        for col, val in per_source_log.unknown_values:
+            unknown_with_source.append((source, val))
 
     rows_per_source = {s: len(df) for s, df in sources.items()}
 
@@ -141,7 +171,9 @@ def load_all(data_dir: Path | None = None) -> LoadResult:
         rows_per_source=rows_per_source,
         rows_dropped_per_source=rows_dropped,
         parse_warnings=parse_warnings,
-        normalisations_applied=normalisations_log,
+        normalisations_applied=aliases_with_source,
+        fuzzy_normalisations=fuzzy_with_source,
+        unknown_categoricals=unknown_with_source,
     )
 
     return LoadResult(

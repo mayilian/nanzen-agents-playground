@@ -185,8 +185,57 @@ wall time / tokens / cost / numeric accuracy, and append a row to a
 | Date | Commit | Model | Wall time | LLM calls | Tokens (in/out) | Cost | Numeric accuracy | Notes |
 |---|---|---|---:|---:|---:|---:|---:|---|
 | 2026-04-26 | `64ef5d9` | claude-haiku-4-5 | 140 s | 24 | 642,803 / 33,964 | ~$0.81 | 30–80% wrong | Baseline (smolagents `CodeAgent`, 3 siloed agents, no verification) |
-| 2026-04-27 | (this PR) | claude-haiku-4-5 | 18.0 s | 1 | 5,933 / 1,473 | $0.013 | 100% (verified) | Phase A–G new pipeline, 1 LLM call, verifier passed |
-| 2026-04-27 | (this PR) | claude-sonnet-4-6 | 28.2 s | 1 | 5,934 / 1,463 | $0.040 | 100% (verified) | Phase A–G new pipeline, 1 LLM call, verifier passed |
+| 2026-04-27 | `e0900a4` | claude-haiku-4-5 | 18.0 s | 1 | 5,933 / 1,473 | $0.013 | 100% (verified) | Phase A–G new pipeline, 1 LLM call, verifier passed |
+| 2026-04-27 | `e0900a4` | claude-sonnet-4-6 | 28.2 s | 1 | 5,934 / 1,463 | $0.040 | 100% (verified) | Phase A–G new pipeline, 1 LLM call, verifier passed |
+| 2026-04-27 | v0.3.0 | claude-haiku-4-5 | 15.8 s | 1 | 5,776 / 1,317 | $0.012 | 100% (verified) | Post-review: config extracted, customer dictionary, multi-key resolvers, fuzzy canonicalisation, LLM hardening, multi-customer regression tests |
+
+## v0.3.0 — production-hardening pass
+
+After the initial rearchitecture, a senior-engineer review surfaced
+the following exercise-grade shortcuts and bugs. All have been fixed:
+
+| Issue | Fix |
+|---|---|
+| `_filter_support_or_crm_or_emails` defaulted to "treat all rows as customer X" — multi-customer scaling foot-gun | Replaced with per-source resolver registry: email domain match, customer department, contact_email domain, contract_reference. Unresolvable rows now subject to per-customer policy (`skip`/`hard_fail`/`include_with_warning`) |
+| `customer_name.split()[0]` heuristic for text matching | Replaced with explicit alias list per customer (`config/customers/<id>.yaml`) |
+| Hardcoded `NORMALISATIONS` ("Enginering" → "Engineering") | Tiered canonicalisation: explicit aliases (Tier 1), fuzzy match via `rapidfuzz` (Tier 2), surfaced unknowns on `LoadReport` (Tier 3); rules in `config/canonicalisations/<source>.<column>.yaml` |
+| Hardcoded `KEYWORDS` for signal retrieval | `config/signals/renewal.yaml` |
+| Hardcoded model pricing in `llm.py` | `config/synthesis/pricing.yaml` |
+| `code_version = "0.2.0"` hardcoded | Derived from `git rev-parse --short HEAD` (with `-dirty` suffix when working tree is dirty) |
+| `raw_lines_in_file = 327` hardcoded in `summary.py` | Passed from `LoadReport` via `pipeline.py` |
+| `derive_invoice_prefix` assumed `CTR-YYYY-XX-NNN` format | Per-customer `contract_id_pattern` regex; explicit `invoice_prefix` override possible |
+| `outstanding_eur` formula choice undocumented | Documented inline with sign-convention rationale |
+| `text_mention` resolver pulled in rows with foreign-customer invoice ids | Restricted to rows with NO joinable identifier (no invoice_id, no contract_reference, no credit_note_ref) |
+| No retry/timeout on Anthropic call | `tenacity`-based bounded retries + explicit 60s timeout |
+| `SYSTEM_PROMPT` inline in `synthesis.py` | `config/synthesis/renewal.prompt.md` (markdown, version-controlled, prompt iteration without code review) |
+| Tests only on Meridian — no multi-customer cross-contamination coverage | `tests/test_multi_customer.py` builds an in-memory two-customer fixture (Meridian + Atlas) with an explicit cross-contamination trap; 6 regression tests, all passing |
+| Risk thresholds (€5000, 3 reminders, 5 SLA breaches) hardcoded | Per-customer `risk_thresholds:` block in customer YAML |
+
+### What this buys us
+
+1. **Onboarding a new customer is a YAML, not a code diff.** Add
+   `config/customers/<account_id>.yaml`. No PR required for the data
+   pipeline.
+2. **Drift detection.** Categorical typos that aren't auto-corrected
+   surface in the LoadReport and end up in the PDF appendix; ignored
+   today, manageable as a queue tomorrow.
+3. **Strict-mode safety at scale.** With `unresolvable_row_policy:
+   hard_fail`, a partially-onboarded customer can't silently get
+   somebody else's data attributed to them.
+4. **Provenance.** Every PDF carries the git SHA of the code that
+   generated it, the model id, the data hash (in the LoadReport), the
+   verifier outcome, and the cost.
+
+### Test coverage
+
+- **15 tests passing** (was 9): summary regression, verify
+  (good/fabricated/length), pipeline e2e (mocked-LLM), and multi-customer
+  cross-contamination (6 tests) including the deliberate cross-customer
+  trap that would have caught the original silent bug.
+- **All on the same data fixture** plus an in-memory two-customer
+  fixture. Net effect: bug surface goes down, regressions fail in CI.
+
+---
 
 ## Headline takeaways
 

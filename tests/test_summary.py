@@ -72,8 +72,9 @@ def test_join_report_uses_multiple_keys_for_billing():
     keys = ctx.join_report.keys_used_per_source["billing"]
     assert keys["contract_reference"] > 0
     assert keys["invoice_id_pattern"] > 0
-    # text_mention catches the misdirected-payment trio (rows with no FKs).
-    assert keys["text_mention"] >= 1
+    # customer_alias_text catches the misdirected-payment trio (rows
+    # with no FKs at all — see joins.py for the third resolver).
+    assert keys["customer_alias_text"] >= 1
 
 
 def test_unknown_account_id_fails_loudly():

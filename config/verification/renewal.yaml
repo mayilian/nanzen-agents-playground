@@ -1,0 +1,37 @@
+# Verifier configuration for the renewal-risk report.
+#
+# Loaded by `challenge.verify.load_verification_policy`.
+# Tightening these without changing tests will likely produce more
+# fallback runs; loosening them will admit more model output. Either
+# direction is a deliberate trade-off.
+
+# Numeric tokens that don't need to derive from the summary.
+small_numbers_tolerated: [0, 1, 2, 3]
+
+# Plain 4-digit integers in this range are accepted as years.
+year_range: [2018, 2030]
+
+# Relative tolerance for "approximately matches a summary number".
+# 0.005 = within 0.5% relative error.
+relative_tolerance: 0.005
+
+# Minimum executive_narrative length. Pydantic enforces an upper bound.
+narrative_min_chars: 50
+
+# Entity-id token prefixes that the verifier should consider citable.
+# Values in source data with these prefixes are matched; anything else
+# in TKT-XXXX-shape is flagged as fabricated.
+entity_id_prefixes:
+  - TKT
+  - INT
+  - INV
+  - DISP
+  - CN
+  - CTR
+  - BIL
+  - CRM
+  - EM
+  - PO
+  - SEPA
+  - RET
+  - CT

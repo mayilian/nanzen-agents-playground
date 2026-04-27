@@ -1,55 +1,104 @@
 """Stage 2 — Multi-key account assembly.
 
-Fixes F1 (silent no-op filter when account_id column missing) and F9
-(sparse contract_reference field misses 64% of rows). Every join is
-explicit, multi-keyed, and audited via JoinReport.
+Given an ``account_id``, produce the per-source DataFrames containing
+only that customer's rows. Audited end-to-end: every match records
+which key fired, every assumption made by a "soft" resolver is
+surfaced on the JoinReport.
 
-For each source, a per-source resolver decides which row belongs to
-which account. The resolver returns both the filtered DataFrame and a
-breakdown of which keys matched how many rows.
+Why this matters:
+- The original system filtered by ``account_id`` only, which silently
+  passed through *all rows* on sources that lacked the column. That
+  bug is fixed structurally here: if a source has no FK and the
+  customer config doesn't tell us how to resolve, the policy decides
+  what to do (``hard_fail`` / ``skip`` / ``include_with_warning``).
+- Per-customer behaviour is driven by ``config/customers/<id>.yaml``
+  (aliases, email domains, departments, invoice prefix) so onboarding
+  a new customer never requires a code change.
+
+Per-source resolvers (in priority order, OR-joined):
+  - ``account_id_column``     — when the CSV has it (accounts, contracts,
+                                product_usage)
+  - ``contract_reference``    — billing rows linked by known contract id
+  - ``invoice_id_pattern``    — billing rows whose invoice_id encodes the
+                                customer code
+  - ``credit_note_ref``       — billing rows referencing a known credit
+                                note or invoice
+  - ``customer_alias_text``   — billing rows whose free-text fields
+                                mention the customer (aliases set)
+  - ``email_domain``          — emails whose ``from`` / ``to`` matches a
+                                customer email domain
+  - ``customer_department``   — support tickets in a known customer
+                                department
+  - ``po_number``             — purchase orders that match billing
+                                ``po_number`` for this customer
 """
 
 from __future__ import annotations
 
+import logging
 import re
+from typing import Optional
 
 import pandas as pd
 
+from challenge.customer import CustomerConfig, load_customer_config
 from challenge.models import AccountContext, JoinReport, LoadResult
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
-# Customer code derivation
+# Customer-code derivation
 # ---------------------------------------------------------------------------
 
 
-def derive_invoice_prefix(contracts_for_account: pd.DataFrame) -> str:
-    """Derive the customer-specific invoice ID prefix from contract IDs.
+def derive_invoice_prefix(
+    contracts_for_account: pd.DataFrame,
+    customer_cfg: CustomerConfig,
+) -> str:
+    """Pick the customer's invoice-id prefix.
 
-    Contract IDs look like "CTR-2023-MH-001"; the third segment is the
-    customer code we need to match invoice IDs like "INV-2024-MH-005".
+    Priority:
+      1. ``customer_cfg.invoice_prefix`` if explicitly set.
+      2. Match ``contract_id`` against ``customer_cfg.contract_id_pattern``
+         and pull the named ``code`` group.
+
+    Raises:
+      ValueError: if neither path yields a code (signals a mis-configured
+        customer file).
     """
+    if customer_cfg.invoice_prefix:
+        return customer_cfg.invoice_prefix
+
     codes: set[str] = set()
     for contract_id in contracts_for_account["contract_id"].dropna():
-        parts = str(contract_id).split("-")
-        if len(parts) >= 3:
-            codes.add(parts[2])
+        m = customer_cfg.contract_id_pattern.match(str(contract_id))
+        if m:
+            try:
+                codes.add(m.group("code"))
+            except IndexError:
+                # Pattern didn't expose a `code` group — caller's problem,
+                # but raise a clear error rather than silent miss.
+                raise ValueError(
+                    f"contract_id_pattern for {customer_cfg.account_id} matches "
+                    f"but has no `code` named group: "
+                    f"{customer_cfg.contract_id_pattern.pattern}"
+                )
+
     if not codes:
         raise ValueError(
-            f"could not derive invoice prefix from contracts: "
-            f"{contracts_for_account['contract_id'].tolist()}"
+            f"could not derive invoice prefix for {customer_cfg.account_id}; "
+            f"contract_ids={contracts_for_account['contract_id'].tolist()!r}, "
+            f"pattern={customer_cfg.contract_id_pattern.pattern}"
         )
-    if len(codes) > 1:
-        # Multiple contracts can share a customer code (e.g. MH for both
-        # MERID-001 contracts). Multiple codes for one account is unusual
-        # but possible — pick the most common.
-        code = max(codes, key=lambda c: (contracts_for_account["contract_id"].str.contains(f"-{c}-")).sum())
-        return code
-    return next(iter(codes))
+    if len(codes) == 1:
+        return next(iter(codes))
+    # Multiple distinct codes is unusual but tolerable; pick the most common.
+    return max(codes, key=lambda c: int(contracts_for_account["contract_id"].str.contains(f"-{c}-").sum()))
 
 
 # ---------------------------------------------------------------------------
-# Per-source resolvers
+# Resolvers
 # ---------------------------------------------------------------------------
 
 
@@ -57,29 +106,30 @@ def _filter_billing(
     billing: pd.DataFrame,
     contract_ids: list[str],
     invoice_prefix: str,
-    customer_name: str,
+    customer_cfg: CustomerConfig,
     keys_used: dict[str, int],
 ) -> pd.DataFrame:
-    """Multi-key billing filter (F9).
+    """Multi-key billing resolver.
 
     Match a row if ANY of:
-    - contract_reference is one of our contracts, OR
-    - invoice_id matches our customer's invoice pattern, OR
-    - credit_note_ref matches a credit note we already pulled in, OR
-    - notes contain the customer's name (catches operational events
-      like the misdirected-payment trio that have no FKs at all).
+      - ``contract_reference`` is one of our known contract ids
+      - ``invoice_id`` matches the customer's invoice pattern
+      - ``credit_note_ref`` references a credit note (or invoice id) we
+        already pulled in
+      - any free-text field contains a customer alias (used to catch
+        operational events such as misdirected-payment refunds that
+        leave every FK blank).
     """
     invoice_re = re.compile(rf"^INV-\d+-{re.escape(invoice_prefix)}-\d+$")
 
     by_contract = billing["contract_reference"].isin(contract_ids)
     by_invoice = billing["invoice_id"].fillna("").str.match(invoice_re.pattern)
-
     keys_used["contract_reference"] = int(by_contract.sum())
     keys_used["invoice_id_pattern"] = int((by_invoice & ~by_contract).sum())
 
     seed = billing[by_contract | by_invoice]
 
-    # Credit-note ref join — strict (no empty-string traps).
+    # Credit-note ref join, strict (no empty-string trap).
     seed_credit_refs = {x for x in seed["credit_note_ref"].dropna().unique() if x}
     seed_invoice_ids = {x for x in seed["invoice_id"].dropna().unique() if x}
     cn = billing["credit_note_ref"].fillna("")
@@ -89,61 +139,220 @@ def _filter_billing(
         (by_credit & ~billing.index.isin(seed_idx)).sum()
     )
 
-    # Text-mention join. The customer's distinctive name fragment (first
-    # word, e.g. "Meridian") found in any free-text field. Restricted to
-    # rows that have an amount, so ambiguous internal notes without
-    # financial impact don't pollute the result.
-    first_word = customer_name.split()[0] if customer_name else ""
-    text_columns = ("description", "remittance_ref", "bank_reference", "notes")
-    if first_word:
-        text_match = pd.Series(False, index=billing.index)
-        for col in text_columns:
-            if col in billing.columns:
-                text_match = text_match | billing[col].fillna("").str.contains(
-                    first_word, case=False, na=False
+    # Alias text mention — last-resort resolver for rows that have NO
+    # joinable identifier at all (typical of operational events like
+    # the misdirected-payment trio: blank contract_reference, blank
+    # invoice_id, blank credit_note_ref, but the customer name appears
+    # in description/remittance/bank fields).
+    #
+    # Critical guard: only match rows where invoice_id AND
+    # contract_reference are both empty. Otherwise a payment for
+    # *another* customer that happens to mention us in a free-text
+    # field would be wrongly attributed (caught by the multi-customer
+    # regression tests).
+    aliases = list(customer_cfg.aliases) or [customer_cfg.canonical_name]
+    text_fields = customer_cfg.text_mention.fields or (
+        "description",
+        "remittance_ref",
+        "bank_reference",
+        "notes",
+    )
+    text_match = pd.Series(False, index=billing.index)
+    for col in text_fields:
+        if col in billing.columns:
+            col_lower = billing[col].fillna("").str.lower()
+            for alias in aliases:
+                if not alias:
+                    continue
+                text_match = text_match | col_lower.str.contains(
+                    re.escape(alias.lower()), regex=True, na=False
                 )
-    else:
-        text_match = pd.Series(False, index=billing.index)
     has_amount = billing["amount"].notna()
-    by_text = text_match & has_amount
-    keys_used["text_mention"] = int(
+    no_other_keys = (
+        billing["invoice_id"].fillna("").eq("")
+        & billing["contract_reference"].fillna("").eq("")
+        & billing["credit_note_ref"].fillna("").eq("")
+    )
+    by_text = text_match & has_amount & no_other_keys
+    keys_used["customer_alias_text"] = int(
         (by_text & ~billing.index.isin(seed_idx) & ~by_credit).sum()
     )
 
     return billing[by_contract | by_invoice | by_credit | by_text].copy()
 
 
-def _filter_by_account_id(
+def _filter_account_id_column(
     df: pd.DataFrame, account_id: str, keys_used: dict[str, int]
 ) -> pd.DataFrame:
-    """Direct account_id filter for sources that have the column."""
+    """Filter sources that have an explicit ``account_id`` column."""
     if "account_id" not in df.columns:
-        return df.iloc[0:0].copy()  # empty with same schema
-    filtered = df[df["account_id"] == account_id].copy()
-    keys_used["account_id"] = int(len(filtered))
-    return filtered
+        keys_used["account_id"] = 0
+        return df.iloc[0:0].copy()
+    out = df[df["account_id"] == account_id].copy()
+    keys_used["account_id"] = int(len(out))
+    return out
 
 
-def _filter_support_or_crm_or_emails(
+def _filter_emails(
     df: pd.DataFrame,
-    account_id: str,
+    customer_cfg: CustomerConfig,
     keys_used: dict[str, int],
     assumptions: list[str],
 ) -> pd.DataFrame:
-    """For sources lacking account_id, fall back to dataset-wide assumption.
+    """Resolve emails by the customer's email domains.
 
-    The fixture data has ONE customer's worth of support/CRM/email rows
-    (Meridian's). When other customers are added, this resolver will
-    need to look up the customer by department, sender domain, or
-    email-thread foreign keys. For now, capture the assumption
-    explicitly so it shows up in the report appendix.
+    Looks at ``from`` and ``to`` columns; matches if either contains a
+    customer-domain substring (case-insensitive).
     """
     if "account_id" in df.columns:
-        return _filter_by_account_id(df, account_id, keys_used)
-    keys_used["dataset_assumption"] = int(len(df))
+        return _filter_account_id_column(df, customer_cfg.account_id, keys_used)
+
+    domains = [d.lower() for d in customer_cfg.email_domains if d]
+    if not domains:
+        keys_used["email_domain"] = 0
+        return _apply_unresolvable_policy(
+            df, customer_cfg, "emails", keys_used, assumptions
+        )
+
+    fromcol = df["from"].fillna("").str.lower() if "from" in df.columns else pd.Series("", index=df.index)
+    tocol = df["to"].fillna("").str.lower() if "to" in df.columns else pd.Series("", index=df.index)
+
+    mask = pd.Series(False, index=df.index)
+    for d in domains:
+        mask = mask | fromcol.str.contains(re.escape(d), regex=True, na=False) | tocol.str.contains(
+            re.escape(d), regex=True, na=False
+        )
+    keys_used["email_domain"] = int(mask.sum())
+    if mask.sum() == 0:
+        return _apply_unresolvable_policy(
+            df, customer_cfg, "emails", keys_used, assumptions
+        )
+    return df[mask].copy()
+
+
+def _filter_support_tickets(
+    df: pd.DataFrame,
+    customer_cfg: CustomerConfig,
+    keys_used: dict[str, int],
+    assumptions: list[str],
+) -> pd.DataFrame:
+    """Resolve support tickets via ``customer_department``.
+
+    ``customer_department`` is only populated on ``ticket_created`` rows
+    (the rest of the interaction stream — replies, status changes,
+    surveys — leaves it blank). Resolution therefore happens in two
+    steps:
+      1. Find ticket_ids whose creation row matches one of the
+         customer's known departments.
+      2. Return *all* interactions for those ticket_ids, blank-department
+         rows included.
+    """
+    if "account_id" in df.columns:
+        return _filter_account_id_column(df, customer_cfg.account_id, keys_used)
+
+    if (
+        "customer_department" in df.columns
+        and "ticket_id" in df.columns
+        and customer_cfg.departments
+    ):
+        creation = df["customer_department"].isin(list(customer_cfg.departments))
+        qualifying_tickets = set(df.loc[creation, "ticket_id"].dropna().unique())
+        mask = df["ticket_id"].isin(qualifying_tickets)
+        keys_used["customer_department"] = int(mask.sum())
+        if mask.sum() > 0:
+            return df[mask].copy()
+
+    keys_used["customer_department"] = 0
+    return _apply_unresolvable_policy(
+        df, customer_cfg, "support_tickets", keys_used, assumptions
+    )
+
+
+def _filter_crm(
+    df: pd.DataFrame,
+    customer_cfg: CustomerConfig,
+    keys_used: dict[str, int],
+    assumptions: list[str],
+) -> pd.DataFrame:
+    """Resolve CRM via contact_email domain match where available."""
+    if "account_id" in df.columns:
+        return _filter_account_id_column(df, customer_cfg.account_id, keys_used)
+
+    domains = [d.lower() for d in customer_cfg.email_domains if d]
+    if domains and "contact_email" in df.columns:
+        col = df["contact_email"].fillna("").str.lower()
+        mask = pd.Series(False, index=df.index)
+        for d in domains:
+            mask = mask | col.str.contains(re.escape(d), regex=True, na=False)
+        keys_used["contact_email_domain"] = int(mask.sum())
+        if mask.sum() > 0:
+            return df[mask].copy()
+        keys_used["contact_email_domain"] = 0
+
+    return _apply_unresolvable_policy(
+        df, customer_cfg, "crm_interactions", keys_used, assumptions
+    )
+
+
+def _filter_purchase_orders(
+    df: pd.DataFrame,
+    contract_ids: list[str],
+    customer_cfg: CustomerConfig,
+    keys_used: dict[str, int],
+    assumptions: list[str],
+) -> pd.DataFrame:
+    """Resolve POs via ``contract_reference`` linking back to known contracts."""
+    if "account_id" in df.columns:
+        return _filter_account_id_column(df, customer_cfg.account_id, keys_used)
+
+    if "contract_reference" in df.columns:
+        mask = df["contract_reference"].isin(contract_ids)
+        keys_used["contract_reference"] = int(mask.sum())
+        if mask.sum() > 0:
+            return df[mask].copy()
+        keys_used["contract_reference"] = 0
+
+    return _apply_unresolvable_policy(
+        df, customer_cfg, "purchase_orders", keys_used, assumptions
+    )
+
+
+def _apply_unresolvable_policy(
+    df: pd.DataFrame,
+    customer_cfg: CustomerConfig,
+    source_name: str,
+    keys_used: dict[str, int],
+    assumptions: list[str],
+) -> pd.DataFrame:
+    """Decide what to do with a source we can't resolve confidently.
+
+    Driven by ``customer_cfg.unresolvable_row_policy``:
+      - ``hard_fail`` — raise; production safe default
+      - ``skip``      — drop all rows
+      - ``include_with_warning`` — keep rows, warn on JoinReport
+    """
+    policy = customer_cfg.unresolvable_row_policy
+    if policy == "hard_fail":
+        raise RuntimeError(
+            f"cannot resolve any rows in '{source_name}' for "
+            f"{customer_cfg.account_id}: no FK column, no email/department "
+            f"match, and policy is hard_fail. Either add a resolver hint to "
+            f"config/customers/{customer_cfg.account_id}.yaml or change the "
+            f"policy."
+        )
+    if policy == "skip":
+        keys_used["unresolved_skipped"] = int(len(df))
+        assumptions.append(
+            f"{source_name}: no resolvable key for {customer_cfg.account_id}; "
+            f"all {len(df)} rows skipped per policy=skip."
+        )
+        return df.iloc[0:0].copy()
+    # include_with_warning
+    keys_used["unresolved_included"] = int(len(df))
     assumptions.append(
-        f"source has no account_id column; treating all {len(df)} rows as "
-        f"belonging to {account_id}"
+        f"{source_name}: no resolvable key for {customer_cfg.account_id}; "
+        f"keeping all {len(df)} rows per policy=include_with_warning. "
+        f"This is unsafe at multi-customer scale."
     )
     return df.copy()
 
@@ -153,25 +362,44 @@ def _filter_support_or_crm_or_emails(
 # ---------------------------------------------------------------------------
 
 
-def build_account_context(load: LoadResult, account_id: str) -> AccountContext:
-    """Filter every source down to one account; produce AccountContext."""
+def build_account_context(
+    load: LoadResult,
+    account_id: str,
+    *,
+    customer_cfg: Optional[CustomerConfig] = None,
+) -> AccountContext:
+    """Filter every CSV down to one customer; return ``AccountContext``.
+
+    Args:
+      load:         output of ``data_io.load_all``.
+      account_id:   the customer to scope to.
+      customer_cfg: optional pre-loaded customer config (for tests).
+
+    Raises:
+      ValueError:        account not found in accounts.csv.
+      RuntimeError:      a source could not be resolved and the
+        customer's policy is ``hard_fail``.
+      FileNotFoundError: no per-customer config file exists.
+    """
     accounts = load.accounts
     if account_id not in set(accounts["account_id"]):
         valid = sorted(accounts["account_id"].unique())
         raise ValueError(
-            f"account_id {account_id!r} not found in accounts.csv. "
-            f"Valid: {valid}"
+            f"account_id {account_id!r} not found in accounts.csv. Valid: {valid}"
         )
-    customer_name = accounts.loc[accounts["account_id"] == account_id, "customer_name"].iloc[0]
+    customer_name = accounts.loc[
+        accounts["account_id"] == account_id, "customer_name"
+    ].iloc[0]
 
-    # Contracts (definitely has account_id)
+    customer_cfg = customer_cfg or load_customer_config(account_id)
+
     contracts = load.contracts[load.contracts["account_id"] == account_id].copy()
     if contracts.empty:
         raise ValueError(
-            f"no contracts found for {account_id}; cannot derive invoice prefix"
+            f"no contracts for {account_id}; cannot derive invoice prefix"
         )
     contract_ids = sorted(contracts["contract_id"].unique().tolist())
-    invoice_prefix = derive_invoice_prefix(contracts)
+    invoice_prefix = derive_invoice_prefix(contracts, customer_cfg)
 
     keys_used_per_source: dict[str, dict[str, int]] = {}
     rows_matched: dict[str, int] = {}
@@ -180,43 +408,44 @@ def build_account_context(load: LoadResult, account_id: str) -> AccountContext:
     keys_used_per_source["contracts"] = {"account_id": len(contracts)}
     rows_matched["contracts"] = len(contracts)
 
-    # Billing — multi-key
+    # Billing
     billing_keys: dict[str, int] = {}
     billing = _filter_billing(
-        load.billing, contract_ids, invoice_prefix, str(customer_name), billing_keys
+        load.billing, contract_ids, invoice_prefix, customer_cfg, billing_keys
     )
     keys_used_per_source["billing"] = billing_keys
     rows_matched["billing"] = len(billing)
 
-    # Product usage — has account_id
+    # Product usage
     pu_keys: dict[str, int] = {}
-    product_usage = _filter_by_account_id(load.product_usage, account_id, pu_keys)
+    product_usage = _filter_account_id_column(load.product_usage, account_id, pu_keys)
     keys_used_per_source["product_usage"] = pu_keys
     rows_matched["product_usage"] = len(product_usage)
 
-    # Support, CRM, emails, POs — fall back to dataset assumption
+    # Support tickets
     sup_keys: dict[str, int] = {}
-    support = _filter_support_or_crm_or_emails(
-        load.support_tickets, account_id, sup_keys, assumptions
+    support = _filter_support_tickets(
+        load.support_tickets, customer_cfg, sup_keys, assumptions
     )
     keys_used_per_source["support_tickets"] = sup_keys
     rows_matched["support_tickets"] = len(support)
 
+    # CRM
     crm_keys: dict[str, int] = {}
-    crm = _filter_support_or_crm_or_emails(
-        load.crm_interactions, account_id, crm_keys, assumptions
-    )
+    crm = _filter_crm(load.crm_interactions, customer_cfg, crm_keys, assumptions)
     keys_used_per_source["crm_interactions"] = crm_keys
     rows_matched["crm_interactions"] = len(crm)
 
+    # Emails
     em_keys: dict[str, int] = {}
-    emails = _filter_support_or_crm_or_emails(load.emails, account_id, em_keys, assumptions)
+    emails = _filter_emails(load.emails, customer_cfg, em_keys, assumptions)
     keys_used_per_source["emails"] = em_keys
     rows_matched["emails"] = len(emails)
 
+    # Purchase orders
     po_keys: dict[str, int] = {}
-    purchase_orders = _filter_support_or_crm_or_emails(
-        load.purchase_orders, account_id, po_keys, assumptions
+    purchase_orders = _filter_purchase_orders(
+        load.purchase_orders, contract_ids, customer_cfg, po_keys, assumptions
     )
     keys_used_per_source["purchase_orders"] = po_keys
     rows_matched["purchase_orders"] = len(purchase_orders)

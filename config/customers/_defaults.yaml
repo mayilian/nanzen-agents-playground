@@ -1,0 +1,25 @@
+# Default customer settings. Per-customer YAML files override fields
+# selectively; anything they omit falls back to these.
+
+# Pattern that contract IDs must match. Used by the joins layer to
+# derive the customer's invoice prefix; per-customer files override.
+contract_id_pattern: "^CTR-\\d{4}-(?P<code>[A-Z]{2,4})-\\d{3}$"
+
+# Used by joins.text_mention. ``customer_first_word`` is the conservative
+# default — a customer file can supply explicit aliases instead.
+text_mention:
+  use_customer_first_word: true
+  fields: [description, remittance_ref, bank_reference, notes]
+
+# Risk thresholds — these drive the rule_flag emitter in summary.py.
+risk_thresholds:
+  outstanding_eur_alert: 5000
+  reminder_count_warn: 3
+  sla_breach_alert: 5
+  csat_min_warn: 3.5
+
+# What to do when a row in a source without account_id can't be linked
+# to this account. ``hard_fail`` is the default for production safety;
+# ``skip`` quietly drops the row; ``include_with_warning`` keeps it
+# (the old behaviour) but logs the assumption.
+unresolvable_row_policy: skip

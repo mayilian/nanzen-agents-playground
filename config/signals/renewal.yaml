@@ -1,0 +1,47 @@
+# Signal-retrieval policy for the renewal-risk report.
+#
+# Loaded by `challenge.signals.load_signal_policy`. New report types
+# (QBR, churn, expansion) get their own policy file.
+
+keywords:
+  # Renewal lifecycle
+  - renewal
+  - renew
+  - contract end
+  - extension
+  # Buying-side stakeholders / processes
+  - CFO
+  - CEO
+  - CTO
+  - vendor review
+  - procurement review
+  - legal review
+  - compliance
+  - evaluat            # evaluate / evaluation
+  # Risk / churn signals
+  - escalat            # escalate / escalating
+  - churn
+  - downgrade
+  - cancel
+  - terminate
+  - dispute
+  # Operational issues that affect renewal sentiment
+  - BILLING ERROR
+  - outage
+  - SLA breach
+
+text_field_max_chars: 600
+max_signals: 24
+recent_window_days: 90
+
+# Per-source overrides (which fields to scan for keywords).
+# Keys are CSV file basenames.
+sources:
+  billing:
+    fields: [notes, description]
+  support_tickets:
+    fields: [content, notes]
+  crm_interactions:
+    fields: [body, subject]
+  emails:
+    fields: [body, subject]

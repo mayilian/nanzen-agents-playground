@@ -1,0 +1,33 @@
+# Categorical canonicalisation rules for `product_usage.department`.
+#
+# Loaded by `challenge.canonical.load_canonicalisations`. Editing this file
+# does not require a code review — only a config review.
+#
+# Schema:
+#   known_values:  the authoritative list. Anything outside is suspect.
+#   aliases:       explicit known typos / variants → canonical form.
+#   fuzzy_match:   automatic correction policy when `aliases` doesn't cover a value.
+#
+# Discovery history is recorded in the audit trail, not here.
+
+known_values:
+  - Engineering
+  - Marketing
+  - Sales
+  - Finance
+  - HR
+  - Procurement
+  - Legal
+  - Operations
+
+aliases:
+  Enginering: Engineering   # surfaced in fixture data; auto-correctable
+  Eng: Engineering
+  R&D: Engineering
+  Mktg: Marketing
+  Mkting: Marketing
+
+fuzzy_match:
+  enabled: true
+  threshold: 0.88           # ratio score 0..1; rapidfuzz.fuzz.ratio / 100
+  min_length: 4             # avoid matching very short strings

@@ -1,13 +1,21 @@
 """End-to-end pipeline: account_id → renewal-risk PDF.
 
-Stages 1..7 wired together. Single entry point: `run(account_id)`.
+Stages 1..7 wired together. Single entry point: :func:`run`.
+
+The orchestrator owes the renderer a ``RunMetadata`` instance with
+honest provenance — code version derived from git rev-parse, model id
+from env, token counts captured even on synthesis-validation failure,
+and a verification result that's surfaced explicitly (passed / failed
+diagnostics).
 """
 
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +37,41 @@ from challenge.verify import verify
 
 logger = logging.getLogger(__name__)
 
-CODE_VERSION = "0.2.0"
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_code_version() -> str:
+    """Try git short SHA, fall back to the package version, then "dev"."""
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if sha.returncode == 0 and sha.stdout.strip():
+            dirty = subprocess.run(
+                ["git", "-C", str(_REPO_ROOT), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            tag = sha.stdout.strip()
+            if dirty.returncode == 0 and dirty.stdout.strip():
+                tag += "-dirty"
+            return tag
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+    try:
+        return version("agent-challenge")
+    except PackageNotFoundError:
+        return "dev"
+
+
+CODE_VERSION = _resolve_code_version()
 
 
 def run(
@@ -49,7 +91,17 @@ def run(
     ctx = build_account_context(load, account_id)
 
     # Stage 3: deterministic summary
-    summary: AccountSummary = build_account_summary(ctx, as_of=started_at)
+    raw_lines = (
+        load.report.rows_per_source.get("support_tickets", 0)
+        + load.report.rows_dropped_per_source.get("support_tickets", 0)
+        + 1  # +1 for header
+    )
+    summary: AccountSummary = build_account_summary(
+        ctx,
+        as_of=started_at,
+        raw_lines_in_file=raw_lines,
+        interactions_dropped=load.report.rows_dropped_per_source.get("support_tickets", 0),
+    )
 
     # Stage 4: signal retrieval
     signals: list[TextSignal] = retrieve_signals(ctx, summary)

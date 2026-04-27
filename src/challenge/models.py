@@ -24,15 +24,25 @@ from pydantic import BaseModel, Field
 class LoadReport:
     """Audit trail of how the raw CSVs were loaded.
 
-    Surfaces every data-quality anomaly (F3: dropped rows, F6: typo
-    normalisations, schema mismatches) so they end up in the report
-    appendix rather than vanishing.
+    Every data-quality anomaly that the ingestion stage observes ends up
+    here rather than being silently swallowed; the renderer surfaces all
+    of these in the PDF appendix.
+
+    Fields:
+      rows_per_source           : final loaded row count by CSV
+      rows_dropped_per_source   : malformed rows skipped during parsing
+      parse_warnings            : human-readable parse-stage notes
+      normalisations_applied    : Tier-1 alias hits (source, from, to)
+      fuzzy_normalisations      : Tier-2 fuzzy hits (source, from, to, score)
+      unknown_categoricals      : Tier-3 surfaced values (source, value)
     """
 
     rows_per_source: dict[str, int]
     rows_dropped_per_source: dict[str, int]
     parse_warnings: list[str]
-    normalisations_applied: list[tuple[str, str, str]]  # (source, from, to)
+    normalisations_applied: list[tuple[str, str, str]]   # (source, from, to)
+    fuzzy_normalisations: list[tuple[str, str, str, float]] = field(default_factory=list)
+    unknown_categoricals: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

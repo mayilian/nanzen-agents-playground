@@ -20,6 +20,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from challenge.customer import RiskThresholds, load_customer_config
 from challenge.models import (
     AccountContext,
     AccountSummary,
@@ -46,9 +47,28 @@ def billing_facts(ctx: AccountContext) -> BillingFacts:
     paid = _sum_amount(b, b["event_type"] == "payment_received")
     credits = _sum_amount(b, b["event_type"] == "credit_note_issued")
     refunds = _sum_amount(b, b["event_type"] == "refund_completed")
-    # Sign convention in this dataset: credits and refunds are stored as
-    # negative numbers. Outstanding nets credits in (reducing receivable)
-    # and treats refunds as already-offsetting against payments.
+    # Outstanding sign convention.
+    #
+    # In this dataset, credits and refunds are stored as negative
+    # numbers (a -€3,600 credit_note_issued row reduces what the
+    # customer owes; a -€18,150 refund_completed row offsets a
+    # previously-recorded duplicate payment).
+    #
+    # We use:
+    #   outstanding = invoiced - paid - credits + refunds
+    #
+    # Read in plain English: total invoiced, minus what came in via
+    # payments, minus credits we owe back to them (subtracting a
+    # negative ⇒ adding the absolute value), plus refunds we paid them
+    # (adding a negative ⇒ subtracting the absolute value, which
+    # cancels the original duplicate-payment receipt).
+    #
+    # Result for Meridian: ~€3,701 net "outstanding" (effectively nil).
+    # If you want a stricter "what's gross-unpaid right now" metric, use
+    # ``invoiced - paid + credits + refunds`` (i.e. don't double-count
+    # refund-of-duplicate-payments). We chose the more forgiving
+    # formula because finance audits this customer's ledger separately;
+    # see PLAN.md §9 open decision #5.
     outstanding = invoiced - paid - credits + refunds
 
     days_past_due = pd.to_numeric(b["days_past_due"], errors="coerce").fillna(0)
@@ -168,17 +188,30 @@ def usage_facts(ctx: AccountContext) -> UsageFacts:
     )
 
 
-def support_facts(ctx: AccountContext) -> SupportFacts:
+def support_facts(
+    ctx: AccountContext,
+    *,
+    raw_lines_in_file: Optional[int] = None,
+    interactions_dropped: Optional[int] = None,
+) -> SupportFacts:
+    """Compute the support-side facts for the renewal report.
+
+    Args:
+      ctx:                 account-scoped DataFrames.
+      raw_lines_in_file:   the upstream physical line count for the
+        support_tickets CSV. Pass from LoadReport rather than
+        hardcoding so a file change doesn't silently drift.
+      interactions_dropped: count of malformed rows skipped during
+        parsing. Same provenance.
+    """
     raw = ctx.support_tickets.copy()
-    raw_lines = 327  # known size of the upstream file
-    interactions_dropped = raw_lines - len(raw) - 1  # -1 for header
     raw["timestamp"] = pd.to_datetime(raw["timestamp"], errors="coerce")
 
     if raw.empty:
         return SupportFacts(
-            raw_lines_in_file=raw_lines,
+            raw_lines_in_file=raw_lines_in_file or 0,
             interactions_parsed=0,
-            interactions_dropped=interactions_dropped,
+            interactions_dropped=interactions_dropped or 0,
             unique_tickets=0,
             open_tickets=0,
             resolved_tickets=0,
@@ -215,9 +248,9 @@ def support_facts(ctx: AccountContext) -> SupportFacts:
     resolved_durations = durations_days.loc[durations_days.index.isin(resolved_ids)]
 
     return SupportFacts(
-        raw_lines_in_file=raw_lines,
+        raw_lines_in_file=raw_lines_in_file or 0,
         interactions_parsed=len(raw),
-        interactions_dropped=interactions_dropped,
+        interactions_dropped=interactions_dropped or 0,
         unique_tickets=int(raw["ticket_id"].nunique()),
         open_tickets=int(raw["ticket_id"].nunique()) - len(resolved_ids),
         resolved_tickets=len(resolved_ids),
@@ -232,9 +265,20 @@ def support_facts(ctx: AccountContext) -> SupportFacts:
     )
 
 
-def derive_rule_flags(billing: BillingFacts, usage: UsageFacts, support: SupportFacts) -> list[RuleFlag]:
+def derive_rule_flags(
+    billing: BillingFacts,
+    usage: UsageFacts,
+    support: SupportFacts,
+    thresholds: RiskThresholds,
+) -> list[RuleFlag]:
+    """Translate facts + per-customer thresholds into ``RuleFlag``s.
+
+    Thresholds (e.g. "outstanding > €5000 → warn") come from the
+    customer's YAML so different customer segments can have different
+    risk tolerances.
+    """
     flags: list[RuleFlag] = []
-    if billing.outstanding_eur > 5000:
+    if billing.outstanding_eur > thresholds.outstanding_eur_alert:
         flags.append(
             RuleFlag(
                 id="outstanding-balance",
@@ -246,7 +290,7 @@ def derive_rule_flags(billing: BillingFacts, usage: UsageFacts, support: Support
                 ],
             )
         )
-    if billing.reminders_sent > 3:
+    if billing.reminders_sent > thresholds.reminder_count_warn:
         flags.append(
             RuleFlag(
                 id="late-payment-pattern",
@@ -287,36 +331,70 @@ def derive_rule_flags(billing: BillingFacts, usage: UsageFacts, support: Support
             )
         )
     if support.sla_breaches > 0:
-        sev = "alert" if support.sla_breaches > 5 else "warn"
+        severity = "alert" if support.sla_breaches > thresholds.sla_breach_alert else "warn"
         flags.append(
             RuleFlag(
                 id="sla-breaches",
-                severity=sev,
-                message=f"{support.sla_breaches} SLA breach(es) across {support.unique_tickets} tickets",
+                severity=severity,
+                message=(
+                    f"{support.sla_breaches} SLA breach(es) across "
+                    f"{support.unique_tickets} tickets"
+                ),
                 evidence=[
                     f"support.sla_breaches={support.sla_breaches}",
                     f"support.unique_tickets={support.unique_tickets}",
                 ],
             )
         )
-    if support.mean_csat is not None and support.mean_csat < 3.5:
+    if (
+        support.mean_csat is not None
+        and support.mean_csat < thresholds.csat_min_warn
+    ):
         flags.append(
             RuleFlag(
                 id="low-csat",
                 severity="alert",
-                message=f"mean CSAT {support.mean_csat} below 3.5 threshold",
+                message=(
+                    f"mean CSAT {support.mean_csat} below "
+                    f"{thresholds.csat_min_warn} threshold"
+                ),
                 evidence=[f"support.mean_csat={support.mean_csat}"],
             )
         )
     return flags
 
 
-def build_account_summary(ctx: AccountContext, as_of: Optional[datetime] = None) -> AccountSummary:
-    """Top-level: AccountContext → AccountSummary. No LLM, no surprises."""
+def build_account_summary(
+    ctx: AccountContext,
+    *,
+    as_of: Optional[datetime] = None,
+    thresholds: Optional[RiskThresholds] = None,
+    raw_lines_in_file: Optional[int] = None,
+    interactions_dropped: Optional[int] = None,
+) -> AccountSummary:
+    """Top-level: ``AccountContext`` → ``AccountSummary``. No LLM.
+
+    Args:
+      ctx:                   account-scoped DataFrames.
+      as_of:                 timestamp for the report header. Defaults to now (UTC).
+      thresholds:            per-customer risk thresholds. Defaults to
+        the values in the customer's YAML; pass an explicit instance
+        to override (handy for tests or for re-flagging an existing
+        report at different thresholds).
+      raw_lines_in_file:     pass from LoadReport so support facts
+        carry the right provenance.
+      interactions_dropped:  same.
+    """
     bill = billing_facts(ctx)
     use = usage_facts(ctx)
-    sup = support_facts(ctx)
-    flags = derive_rule_flags(bill, use, sup)
+    sup = support_facts(
+        ctx,
+        raw_lines_in_file=raw_lines_in_file,
+        interactions_dropped=interactions_dropped,
+    )
+    if thresholds is None:
+        thresholds = load_customer_config(ctx.account_id).risk_thresholds
+    flags = derive_rule_flags(bill, use, sup, thresholds)
     return AccountSummary(
         account_id=ctx.account_id,
         customer_name=ctx.customer_name,

@@ -1,0 +1,12 @@
+12:09:22 [httpx] INFO: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+
+======================================================================
+Renewal-risk pipeline — MERID-001 (Meridian Health)
+======================================================================
+  PDF:           /Users/mayiliad/workspace/nanzen/nanzen-agents-playground/output/MERID-001-renewal.pdf
+  Wall time:     18.02s
+  LLM calls:     1  (claude-haiku-4-5-20251001)
+  Tokens:        5,933 in / 1,473 out
+  Cost (USD):    $0.0133
+  Verification:  verification passed
+  Fallback used: no

@@ -33,17 +33,32 @@ Cost figures use Anthropic Haiku 4.5 list pricing as a rough estimate
 
 ## Headline metrics
 
-| Metric | Baseline | Target (Phase G) | Achieved |
-|---|---:|---:|---:|
-| Wall time per renewal report | **140 s** | < 15 s | _tbd_ |
-| LLM calls per renewal | **~24** (3 agents × 6–10 steps) | **1** | _tbd_ |
-| Input tokens (sum across tasks) | **642,803** | < 5,000 | _tbd_ |
-| Output tokens (sum across tasks) | **33,964** | < 1,000 | _tbd_ |
-| Estimated cost per renewal (Haiku 4.5) | **~$0.81** | < $0.02 | _tbd_ |
-| Estimated cost per renewal (Sonnet 4.6) | not tested | < $0.20 | _tbd_ |
-| Reports produced | 3 siloed PDFs | 1 renewal PDF | _tbd_ |
-| Verification on output | **none** (`[OK]` regardless) | numeric + citation gate | _tbd_ |
-| Numeric tokens traceable to source | 0% | 100% | _tbd_ |
+| Metric | Baseline | Target (Phase G) | Achieved (Haiku 4.5) | Achieved (Sonnet 4.6) |
+|---|---:|---:|---:|---:|
+| Wall time per renewal report | **140 s** | < 15 s | **18.0 s** | **28.2 s** |
+| LLM calls per renewal | **~24** (3 agents × 6–10 steps) | **1** | **1** ✅ | **1** ✅ |
+| Input tokens (sum across tasks) | **642,803** | < 5,000 | **5,933** (~ target) | **5,934** (~ target) |
+| Output tokens (sum across tasks) | **33,964** | < 1,000 | **1,473** (47% over) | **1,463** (46% over) |
+| Estimated cost per renewal | **~$0.81** (Haiku) | < $0.02 (Haiku) | **$0.013** ✅ | **$0.040** ✅ |
+| Reports produced | 3 siloed PDFs | 1 renewal PDF | **1** ✅ | **1** ✅ |
+| Verification on output | **none** (`[OK]` regardless) | numeric + citation gate | **passed** ✅ | **passed** ✅ |
+| Numeric tokens traceable to source | 0% | 100% | **100%** ✅ | **100%** ✅ |
+
+### Targets we missed
+
+- **Wall time** target was <15 s; Haiku came in at 18 s, Sonnet at 28 s.
+  ~80% of wall is the LLM call itself; the deterministic stages run in
+  ~1 s combined. Closer to target would require either a smaller model,
+  prompt-cached system content (5 min TTL), or accepting Sonnet's better
+  reasoning at the cost of seconds.
+- **Output tokens** target was <1,000; both models produced ~1,470. The
+  narrative + 3 talking points naturally need that headroom for a
+  reviewable artefact. Could be enforced by stricter Pydantic
+  `max_length`, but readability suffers.
+- **Input tokens** target was <5,000; both runs landed at ~5,934. The
+  AccountSummary JSON + 24 TextSignals dominate. Could trim further by
+  shortening signal texts or excluding less-useful fields, but the
+  marginal cost ($0.0006/run on Haiku) doesn't justify it.
 
 ---
 
@@ -167,8 +182,19 @@ wall time / tokens / cost / numeric accuracy, and append a row to a
 
 ## History
 
-_(populated by `make benchmark` after each milestone)_
+| Date | Commit | Model | Wall time | LLM calls | Tokens (in/out) | Cost | Numeric accuracy | Notes |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| 2026-04-26 | `64ef5d9` | claude-haiku-4-5 | 140 s | 24 | 642,803 / 33,964 | ~$0.81 | 30–80% wrong | Baseline (smolagents `CodeAgent`, 3 siloed agents, no verification) |
+| 2026-04-27 | (this PR) | claude-haiku-4-5 | 18.0 s | 1 | 5,933 / 1,473 | $0.013 | 100% (verified) | Phase A–G new pipeline, 1 LLM call, verifier passed |
+| 2026-04-27 | (this PR) | claude-sonnet-4-6 | 28.2 s | 1 | 5,934 / 1,463 | $0.040 | 100% (verified) | Phase A–G new pipeline, 1 LLM call, verifier passed |
 
-| Date | Commit | Wall time | LLM calls | Tokens (in/out) | Cost (Haiku) | Numeric accuracy | Notes |
-|---|---|---:|---:|---:|---:|---:|---|
-| 2026-04-26 | `64ef5d9` | 140 s | 24 | 642,803 / 33,964 | ~$0.81 | 30–80% wrong | Baseline (smolagents `CodeAgent`, 3 siloed agents, no verification) |
+## Headline takeaways
+
+Comparing the new pipeline (Haiku) to the baseline:
+
+- **62× cost reduction** ($0.81 → $0.013)
+- **24× fewer LLM calls** (24 → 1)
+- **8× faster** (140 s → 18 s)
+- **108× fewer input tokens** (643k → 5.9k); **23× fewer output tokens** (34k → 1.5k)
+- **Numeric accuracy from 30–80% wrong → 100% verified** (every numeric token traced to summary or cited signal; otherwise the run falls back)
+- **From 3 disconnected PDFs to 1 combined renewal-risk artefact** with executive narrative, talking points, and a traffic-light verdict

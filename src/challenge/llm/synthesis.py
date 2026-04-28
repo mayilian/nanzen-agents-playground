@@ -18,7 +18,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from challenge.config import config_dir
-from challenge.llm import LLMResponse, call_with_tool
+from challenge.llm.client import LLMResponse, call_with_tool
 from challenge.models import AccountSummary, RenewalVerdict, TextSignal
 
 

@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-CONFIG_DIR_DEFAULT = Path(__file__).resolve().parents[2] / "config"
+CONFIG_DIR_DEFAULT = Path(__file__).resolve().parents[3] / "config"
 
 _cache: dict[Path, dict] = {}
 _cache_lock = threading.Lock()

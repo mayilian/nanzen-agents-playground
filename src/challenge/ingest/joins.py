@@ -41,7 +41,7 @@ from typing import Optional
 
 import pandas as pd
 
-from challenge.customer import CustomerConfig, load_customer_config
+from challenge.config.customer import CustomerConfig, load_customer_config
 from challenge.models import AccountContext, JoinReport, LoadResult
 
 logger = logging.getLogger(__name__)

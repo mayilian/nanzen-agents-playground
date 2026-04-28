@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from challenge.config import config_dir, load_yaml
+from challenge.config.loader import config_dir, load_yaml
 
 
 @dataclass(frozen=True)

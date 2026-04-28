@@ -22,15 +22,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from challenge.canonical import CanonicalisationLog, normalise_column
 from challenge.config import config_dir
+from challenge.ingest.canonical import CanonicalisationLog, normalise_column
 from challenge.models import LoadReport, LoadResult
 
 logger = logging.getLogger(__name__)
 
 # Project-relative resolution. data_io.py lives in src/challenge/, so
 # the project root is parents[2].
-DATA_DIR_DEFAULT = Path(__file__).resolve().parents[2] / "data"
+DATA_DIR_DEFAULT = Path(__file__).resolve().parents[3] / "data"
 
 
 # Required columns per CSV. Used for schema validation at load time.

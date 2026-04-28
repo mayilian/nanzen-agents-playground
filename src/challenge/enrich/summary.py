@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from challenge.customer import RiskThresholds, load_customer_config
+from challenge.config.customer import RiskThresholds, load_customer_config
 from challenge.models import (
     AccountContext,
     AccountSummary,

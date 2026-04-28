@@ -19,9 +19,12 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Optional
 
-from challenge.data_io import load_all
-from challenge.joins import build_account_context
-from challenge.llm import estimate_cost_usd, resolve_model_id
+from challenge.enrich.signals import retrieve_signals
+from challenge.enrich.summary import build_account_summary
+from challenge.ingest.data_io import load_all
+from challenge.ingest.joins import build_account_context
+from challenge.llm.client import estimate_cost_usd, resolve_model_id
+from challenge.llm.synthesis import SynthesisValidationError, synthesize_verdict
 from challenge.models import (
     AccountSummary,
     RenewalVerdict,
@@ -30,9 +33,6 @@ from challenge.models import (
     VerificationResult,
 )
 from challenge.render import render_renewal_pdf
-from challenge.signals import retrieve_signals
-from challenge.summary import build_account_summary
-from challenge.synthesis import SynthesisValidationError, synthesize_verdict
 from challenge.verify import verify
 
 logger = logging.getLogger(__name__)

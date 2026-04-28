@@ -16,9 +16,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from challenge.customer import CustomerConfig, RiskThresholds, TextMentionPolicy
-from challenge.data_io import load_all
-from challenge.joins import build_account_context
+from challenge.config.customer import CustomerConfig, RiskThresholds, TextMentionPolicy
+from challenge.ingest.data_io import load_all
+from challenge.ingest.joins import build_account_context
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +315,7 @@ def _build_load_and_ctx(tmp_path: Path, account_id: str):
     _make_customer_configs(cfg_dir)
 
     from challenge.config import reset_cache
-    from challenge.customer import load_customer_config
+    from challenge.config.customer import load_customer_config
 
     reset_cache()
     load = load_all(data_dir=data_dir)
@@ -388,7 +388,7 @@ def test_missing_customer_config_raises(tmp_path):
     # Intentionally do NOT create the customer config files.
 
     from challenge.config import reset_cache
-    from challenge.customer import load_customer_config
+    from challenge.config.customer import load_customer_config
 
     reset_cache()
     with pytest.raises(FileNotFoundError, match="customer config"):

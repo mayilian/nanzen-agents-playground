@@ -87,11 +87,11 @@ One direction. No loops. The LLM never sees raw CSVs — only the typed
 
 | Stage | Module | What it does | LLM? |
 |---|---|---|:---:|
-| 1 | `data_io.py` | Load 8 CSVs, validate schema, canonicalise typos, log dropped rows | — |
-| 2 | `joins.py` | Multi-key account assembly (4 join keys; fixes the silent no-op filter and sparse FK problems) | — |
-| 3 | `summary.py` | Typed `AccountSummary` (billing / usage / support facts + rule-based flags) | — |
-| 4 | `signals.py` | Curate ≤24 free-text excerpts (open high-pri tickets, keyword-tagged notes, recent CRM, stakeholder emails) within token budget | — |
-| 5 | `synthesis.py` | Single Anthropic call with `tool_use` enforcing a Pydantic `RenewalVerdict` schema (verdict, narrative, 3 talking points) | ✅ |
+| 1 | `ingest/data_io.py` | Load 8 CSVs, validate schema, canonicalise typos, log dropped rows | — |
+| 2 | `ingest/joins.py` | Multi-key account assembly (4 join keys; fixes the silent no-op filter and sparse FK problems) | — |
+| 3 | `enrich/summary.py` | Typed `AccountSummary` (billing / usage / support facts + rule-based flags) | — |
+| 4 | `enrich/signals.py` | Curate ≤24 free-text excerpts (open high-pri tickets, keyword-tagged notes, recent CRM, stakeholder emails) within token budget | — |
+| 5 | `llm/synthesis.py` | Single Anthropic call with `tool_use` enforcing a Pydantic `RenewalVerdict` schema (verdict, narrative, 3 talking points) | ✅ |
 | 6 | `verify.py` | Hard gate: every numeric token must derive from `AccountSummary` or a `TextSignal`; every entity ID must exist | — |
 | 7 | `render.py` | Combined renewal-risk PDF with cover, narrative, talking points, sections, and provenance appendix | — |
 
@@ -183,15 +183,21 @@ nanzen-agents-playground/
 │   ├── __main__.py          # CLI: python -m challenge MERID-001
 │   ├── pipeline.py          # orchestrator
 │   ├── models.py            # typed contracts at every boundary
-│   ├── data_io.py           # Stage 1
-│   ├── canonical.py         # categorical normalisation tables
-│   ├── joins.py             # Stage 2 (multi-key)
-│   ├── summary.py           # Stage 3 (deterministic AccountSummary)
-│   ├── signals.py           # Stage 4 (text excerpt retriever)
-│   ├── synthesis.py         # Stage 5 (single Anthropic call)
-│   ├── llm.py               # thin Anthropic SDK wrapper
 │   ├── verify.py            # Stage 6 (hard verification gate)
-│   └── render.py            # Stage 7 (deterministic PDF)
+│   ├── render.py            # Stage 7 (deterministic PDF)
+│   ├── config/              # configuration loaders
+│   │   ├── loader.py        # generic YAML + config_dir helpers
+│   │   └── customer.py      # per-customer YAML (aliases, thresholds, …)
+│   ├── ingest/              # Stages 1–2: CSV → AccountContext
+│   │   ├── data_io.py       # Stage 1 (load + validate)
+│   │   ├── canonical.py     # categorical normalisation tables
+│   │   └── joins.py         # Stage 2 (multi-key account assembly)
+│   ├── enrich/              # Stages 3–4: deterministic facts + text signals
+│   │   ├── summary.py       # Stage 3 (AccountSummary)
+│   │   └── signals.py       # Stage 4 (TextSignal retriever)
+│   └── llm/                 # Stage 5: single Anthropic call
+│       ├── client.py        # thin Anthropic SDK wrapper
+│       └── synthesis.py     # Stage 5 (verdict synthesis)
 ├── tests/                   # 9 passing tests
 │   ├── test_summary.py      # AccountSummary numbers match the oracle
 │   ├── test_verify.py       # verifier accepts grounded, rejects fabricated

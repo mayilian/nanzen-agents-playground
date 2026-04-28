@@ -4,9 +4,9 @@ These are the load-bearing tests. If the data pipeline drifts, this
 catches it.
 """
 
-from challenge.data_io import load_all
-from challenge.joins import build_account_context
-from challenge.summary import build_account_summary
+from challenge.enrich.summary import build_account_summary
+from challenge.ingest.data_io import load_all
+from challenge.ingest.joins import build_account_context
 
 
 def test_meridian_summary_matches_oracle():

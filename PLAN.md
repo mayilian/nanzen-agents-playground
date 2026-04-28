@@ -448,7 +448,7 @@ exit criterion.
 ### Phase A — Foundation: data layer
 **Scope.** `data_io.py`, `joins.py`, `canonical.py`, `models.py`
 (load-side contracts).
-**Exit.** `python -m challenge.data_io --account MERID-001` returns
+**Exit.** `python -m challenge.ingest.data_io --account MERID-001` returns
 clean per-source DataFrames + a `LoadReport` showing 170 dropped rows
 from `support_tickets.csv` and the `Enginering` normalisation applied.
 **Test.** Joins return the same 146 billing rows for MERID as the
